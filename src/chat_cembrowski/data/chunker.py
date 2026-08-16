@@ -370,6 +370,7 @@ def _ocr_fallback_for_page(
     image_path: Path,
     paper_id: str,
     openai_client: OpenAI | None,
+    cache_dir: Path | None,
 ) -> str:
     """
     Transcribe a rendered page image via OCR when `parse_pdf_for_pages()`
@@ -378,6 +379,11 @@ def _ocr_fallback_for_page(
 
     Returns "" if no client was supplied or OCR failed after retries — same
     shape as a page with genuinely no content, so callers don't special-case it.
+
+    cache_dir must be writable by the caller's environment — ocr.OCR_CACHE_DIR's
+    default (under the installed package's location) is not writable in a Lambda
+    deployment, only /tmp is. Pass None to disable caching rather than assume a
+    default is safe to write to.
     """
     if openai_client is None:
         logger.warning(
@@ -389,7 +395,7 @@ def _ocr_fallback_for_page(
     result = ocr.transcribe_image(
         image_path,
         openai_client,
-        cache_dir=ocr.OCR_CACHE_DIR / paper_id,
+        cache_dir=cache_dir / paper_id if cache_dir else None,
     )
     if result.get("error"):
         logger.warning(f"OCR fallback failed for {image_path.name}: {result['error']}")
@@ -403,6 +409,7 @@ def chunk_paper_pages(
     page_images_dir: Path = PAGE_IMAGES_DIR,
     zoom: float = DEFAULT_PAGE_RENDER_ZOOM,
     openai_client: OpenAI | None = None,
+    ocr_cache_dir: Path | None = ocr.OCR_CACHE_DIR,
 ) -> list[Chunk]:
     """
     Render every PDF page as a full-page image and pair it with that page's
@@ -421,6 +428,11 @@ def chunk_paper_pages(
             returned no text for (see `_ocr_fallback_for_page`). None disables
             the fallback — such pages are still embedded (as images) but carry
             no text, same as before this fallback existed.
+        ocr_cache_dir: Base directory for OCR transcription caching, or None to
+            disable it. Must be writable by the caller's environment — the
+            default is fine locally but NOT in a Lambda deployment (only /tmp
+            is writable there), so callers running in Lambda must pass their
+            own writable directory explicitly.
 
     Returns:
         List of Chunk objects; each payload includes page/page_label and the
@@ -455,7 +467,7 @@ def chunk_paper_pages(
 
         if not page_text.strip():
             page_text = _ocr_fallback_for_page(
-                page_images_dir / page_info["image_file"], paper.id, openai_client
+                page_images_dir / page_info["image_file"], paper.id, openai_client, ocr_cache_dir
             )
 
         chunks.append(
