@@ -9,6 +9,9 @@ import uuid
 from pathlib import Path
 
 
+from openai import OpenAI
+
+from . import ocr
 from .models import Paper, Chunk, ImageRecord, Document
 from .parser import preprocess_markdown, parse_pdf_for_pages, render_pdf_pages_as_images, DEFAULT_PAGE_RENDER_ZOOM
 from .serialization import load_paper, load_image_records_for_paper
@@ -363,10 +366,43 @@ def _build_page_payload(
     }
 
 
+def _ocr_fallback_for_page(
+    image_path: Path,
+    paper_id: str,
+    openai_client: OpenAI | None,
+) -> str:
+    """
+    Transcribe a rendered page image via OCR when `parse_pdf_for_pages()`
+    returned no text for it (e.g. a scanned page inside an otherwise
+    born-digital PDF, which has_text_layer()'s per-document check can't catch).
+
+    Returns "" if no client was supplied or OCR failed after retries — same
+    shape as a page with genuinely no content, so callers don't special-case it.
+    """
+    if openai_client is None:
+        logger.warning(
+            f"{image_path.name} has no extractable text and no OpenAI client "
+            "was supplied for OCR fallback; leaving it blank."
+        )
+        return ""
+
+    result = ocr.transcribe_image(
+        image_path,
+        openai_client,
+        cache_dir=ocr.OCR_CACHE_DIR / paper_id,
+    )
+    if result.get("error"):
+        logger.warning(f"OCR fallback failed for {image_path.name}: {result['error']}")
+    elif result["markdown"]:
+        logger.info(f"OCR fallback recovered text for {image_path.name}.")
+    return result["markdown"]
+
+
 def chunk_paper_pages(
     paper: Paper,
     page_images_dir: Path = PAGE_IMAGES_DIR,
     zoom: float = DEFAULT_PAGE_RENDER_ZOOM,
+    openai_client: OpenAI | None = None,
 ) -> list[Chunk]:
     """
     Render every PDF page as a full-page image and pair it with that page's
@@ -381,6 +417,10 @@ def chunk_paper_pages(
         paper: Paper object containing source_file path and metadata.
         page_images_dir: Directory to render page PNGs into.
         zoom: Render scale factor (72 DPI * zoom) passed to render_pdf_pages_as_images.
+        openai_client: Used to OCR any individual page `parse_pdf_for_pages()`
+            returned no text for (see `_ocr_fallback_for_page`). None disables
+            the fallback — such pages are still embedded (as images) but carry
+            no text, same as before this fallback existed.
 
     Returns:
         List of Chunk objects; each payload includes page/page_label and the
@@ -412,6 +452,11 @@ def chunk_paper_pages(
         pdf_page_num = page_info["page"]
         page_text = text_by_page.get(pdf_page_num, "")
         journal_page = pdf_page_num + page_offset
+
+        if not page_text.strip():
+            page_text = _ocr_fallback_for_page(
+                page_images_dir / page_info["image_file"], paper.id, openai_client
+            )
 
         chunks.append(
             Chunk(

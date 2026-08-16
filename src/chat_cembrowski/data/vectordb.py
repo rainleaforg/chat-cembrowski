@@ -499,7 +499,16 @@ if __name__ == "__main__":
                 chunks = chunk_scanned_pages(paper, pages)
                 upsert_kwargs = dict(images_dir=PAGE_IMAGES_DIR, image_batch_size=PAGE_BATCH_SIZE)
             elif method == "page":
-                chunks = chunk_paper_pages(paper, PAGE_IMAGES_DIR, zoom=args.zoom)
+                # has_text_layer() only rules out OCR for the whole document; a
+                # document it (correctly) calls born-digital can still have
+                # individual scanned/image-only pages, so chunk_paper_pages
+                # needs the OCR client too, to fall back per-page rather than
+                # embedding a page with no text at all.
+                if openai_client is None:
+                    openai_client = get_openai_client()
+                chunks = chunk_paper_pages(
+                    paper, PAGE_IMAGES_DIR, zoom=args.zoom, openai_client=openai_client
+                )
                 upsert_kwargs = dict(images_dir=PAGE_IMAGES_DIR, image_batch_size=PAGE_BATCH_SIZE)
             else:
                 chunks = chunk_paper(paper) + chunk_paper_images(paper)
