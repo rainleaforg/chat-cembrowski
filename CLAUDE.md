@@ -31,7 +31,7 @@ uv run -m chat_cembrowski.data.image_extractor      # 3. Extract images → data
 uv run -m chat_cembrowski.data.doc_ingestion        # 4. Ingest docs from data/docs/ → data/doc_json/
 uv run -m chat_cembrowski.data.vectordb             # 5. Chunk + embed + upsert papers, images, and docs to Qdrant
 
-# Target a non-default collection (the code default is the production 'BAPa-V1')
+# Target a non-default collection (the code default is the production 'BAPa-V2')
 uv run -m chat_cembrowski.data.vectordb --collection some-other-collection
 
 # Routing eval — run after any change to CLASSIFIER_PROMPT, the corpus,
@@ -42,7 +42,7 @@ uv run scripts/eval_routing.py --full               # + answers and citation int
 
 # Ingest a scanned (image-only) PDF. --method auto detects the missing text
 # layer; the flags below trim loose material captured alongside the work.
-uv run -m chat_cembrowski.data.vectordb --collection BAPa-V1 \
+uv run -m chat_cembrowski.data.vectordb --collection BAPa-V2 \
     --paper-id <id> --first-sheet 1 --last-sheet 144 --exclude-units 144R
 
 # Reset processed flags (before re-indexing). Re-indexing replaces rather than
@@ -52,10 +52,6 @@ uv run scripts/reset_processed.py --docs     # documents only
 
 # Run queries
 uv run scripts/ask.py             # Edit questions in the file first
-
-# Link poster chunks to their pages on the website (payload-only, no re-embed)
-uv run scripts/link_posters.py            # dry run: report matches
-uv run scripts/link_posters.py --apply    # write site_path + poster_id
 ```
 
 ## Architecture
@@ -161,10 +157,9 @@ in `_classify` and `_generate`.
 
 ### Qdrant configuration
 
-- **Collection**: `BAPa-V1` in production — this is what the website's backend reads, what
-  `scripts/link_posters.py` defaults to, and what `vectordb.COLLECTION_NAME` is set to, so
-  the pipeline targets production by default. Pass `--collection <name>` to work against
-  anything else.
+- **Collection**: `BAPa-V2` in production — this is what the website's backend reads and what
+  `vectordb.COLLECTION_NAME` is set to, so the pipeline targets production by default. Pass
+  `--collection <name>` to work against anything else.
 - **Vector dims**: 1024 (Cosine distance)
 - **Local mode**: If no `QDRANT_CLUSTER_ENDPOINT` is set, uses embedded local DB at `data/vectors/`
 - **Cloud mode**: Set `QDRANT_CLUSTER_ENDPOINT` + `QDRANT_API_KEY` in `.env`
@@ -179,7 +174,7 @@ All points share `chunk_category` ("text" or "image"), `chunk_index`, and `text`
 
 **Document text chunks** additionally store: `source_type="document"`, `doc_id`, `title`, `file_type`.
 
-**Website link fields** (`site_path`, `poster_id`) are written onto poster chunks after ingestion by `scripts/link_posters.py`, not by `vectordb.py` — see below. They are absent until that script runs and are always optional; `_search` reads them when present and a chunk without them degrades to an unlinked citation.
+**Website link fields** (`site_path`, `poster_id`) are stamped onto poster chunks at ingest time by `PAAN-cembrowski/ingestion-lambda/ingest.py::_stamp_site_path`, not by this repo's `vectordb.py`. They are always optional; `_search` reads them when present and a chunk without them degrades to an unlinked citation.
 
 ### Scanned PDFs (`data/ocr.py`)
 
@@ -235,16 +230,7 @@ Edits are detected by `Document.content_hash` (sha256 of the *extracted* text, n
 
 `ensure_collection` indexes `paper_id` and `doc_id` as well as `authors`, since the filtered deletes need them.
 
-**Consequence worth knowing: re-indexing a poster drops its website links.** `link_posters.py` writes `site_path`/`poster_id` via `set_payload` *after* ingestion, so a delete-and-re-upsert clears them and the only symptom is a citation quietly rendering unlinked. `delete_points_for` counts the affected points first and logs a warning naming the re-run command. Re-run `scripts/link_posters.py --apply` after any poster re-ingestion.
-
-### Linking poster chunks to the website (`scripts/link_posters.py`)
-
-The website (`PAAN-cembrowski/frontend`) hosts a page per poster and publishes `public/posters/manifest.json` mapping each poster's stable `id`/`slug` to its `/presentation/<slug>` URL. To turn a retrieved chunk into a clickable citation, each poster chunk needs to know its page on the site. `link_posters.py` backfills two payload fields via Qdrant `set_payload` (**payload-only — vectors and embeddings are untouched, so there is no Voyage cost**):
-
-- `site_path` — e.g. `/presentation/gem-4000-cartridge-instability`
-- `poster_id` — e.g. `pos-gem-4000-cartridge-instability`
-
-Matching uses the same `normalize()` as `frontend/lib/citations.ts`. The corpus and the website were titled independently: 7 posters match on title automatically; the other 8 were re-titled on the site and are bridged by a hand-curated `TITLE_ALIASES` table in the script (each pair verified by author list). A healthy run reports **15 matched, 1 unmatched each way** — the one corpus poster with no site page ("Using serial patient data…") and the one site poster not in the corpus ("Extending accurate patient-based QA…"). Re-run (dry-run first) after any re-ingestion; if a title drifts, the dry-run surfaces it as unmatched and the alias table needs a one-line update.
+**Consequence worth knowing: re-indexing a poster drops its website links.** `site_path`/`poster_id` are stamped by the ingestion-lambda, separately from this pipeline, so a delete-and-re-upsert here clears them and the only symptom is a citation quietly rendering unlinked. `delete_points_for` counts the affected points first and logs a warning.
 
 ### QueryEngine
 
@@ -257,7 +243,7 @@ Matching uses the same `normalize()` as `frontend/lib/citations.ts`. The corpus 
 
 **Only chunks with a `site_path` become numbered SOURCE blocks.** `_answer_cembrowski` splits
 retrieval into `citable` (a linked poster) and `background` (documents, the textbook, and
-posters `link_posters.py` hasn't matched), so the reader-facing source list is never handed
+posters not yet stamped with a `site_path`), so the reader-facing source list is never handed
 something unclickable. Background still informs the answer but carries no number.
 
 Note the consequence: the textbook is unlinked and is most of the corpus, so a book-answered

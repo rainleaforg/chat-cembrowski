@@ -150,7 +150,11 @@ Run from the root of the repository in order:
    Chunks, embeds, and upserts everything to Qdrant.
 
    Optional flag:
-   - `--collection <name>` — Qdrant collection name to upsert into (default: `BAPa-V1`)
+   - `--collection <name>` — Qdrant collection name to upsert into (default: `BAPa-V2`)
+
+   Posters linked to a page on the website get their `site_path` stamped automatically at
+   ingest time by `PAAN-cembrowski/ingestion-lambda/ingest.py::_stamp_site_path` — no separate
+   linking step is needed.
 
 Steps 4–6 skip catalog entries that have no PDF yet, so the pipeline runs cleanly against a partially-sourced corpus — it simply embeds nothing for works you haven't collected. Re-run them as more PDFs arrive.
 
@@ -207,7 +211,7 @@ uv run scripts/chat.py
 Starts an interactive session. Type your question at the prompt; type `exit` or `quit` to stop.
 
 Optional flag:
-- `--collection <name>` — Qdrant collection to query (default: `BAPa-V1`)
+- `--collection <name>` — Qdrant collection to query (default: `BAPa-V2`)
 
 The CLI checks that the collection exists before starting and will list available collections if it doesn't.
 
@@ -219,7 +223,7 @@ uv run scripts/ask.py
 ```
 
 Optional flag:
-- `--collection <name>` — Qdrant collection to query (default: `BAPa-V1`)
+- `--collection <name>` — Qdrant collection to query (default: `BAPa-V2`)
 
 The system retrieves across papers, images, and documents in a single search. The model cites by bracketed number only — `[1]`, `[2]` — matching the `SOURCE n` blocks it was shown; `QueryResult.sources` is aligned by position, so `[i]` resolves to `sources[i - 1]` and the frontend turns it into a link.
 
