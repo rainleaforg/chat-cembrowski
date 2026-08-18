@@ -21,6 +21,7 @@ from .prompts import (
     GENERAL_SYSTEM_PROMPT,
     HOSTILE_SYSTEM_PROMPT,
     IDENTITY_ANSWER,
+    NIH_FALLBACK_SYSTEM_PROMPT,
     NIH_SYSTEM_PROMPT,
     PERSON_SYSTEM_PROMPT,
     SITE_SYSTEM_PROMPT,
@@ -786,26 +787,34 @@ Additional background (not citable — do not cite these with a bracket number, 
         """
         Answer a general medical question from NIH (MedlinePlus/PubMed) search
         results, returning the answer alongside the numbered sources shown.
+
+        The question is reduced to keywords before searching -- sending a
+        whole sentence to a keyword search is why so many questions used to
+        return nothing (see nih.extract_search_terms).
         """
-        results = self._search_nih(search_question or question)
+        search_terms = nih.extract_search_terms(
+            search_question or question, self.llm, self.llm_config
+        )
+        results = self._search_nih(search_terms)
 
         if not results:
-            return (
-                "I couldn't find reliable NIH information to answer this "
-                "question. Please try rephrasing, or consult a healthcare "
-                "professional.\n\n"
-                "This is general information, not medical advice.",
-                [],
-            )
+            # No dead end: fall through to a medical-safety answer from
+            # general knowledge rather than refusing outright.
+            return self._generate(NIH_FALLBACK_SYSTEM_PROMPT, question, history), []
 
         context = self._build_nih_context(results)
         sources = [
             SourceRef(
                 index=i,
                 kind="nih",
-                title=result.title,
+                # The journal, when there is one, moves into the title so the
+                # reader still sees it -- `publication` is always the service
+                # name (MedlinePlus/PubMed) now, not sometimes overwritten by
+                # the journal, so the frontend badge can show which service
+                # actually answered instead of always reading "NIH".
+                title=f"{result.title} ({result.journal})" if result.journal else result.title,
                 url=result.url,
-                publication=result.journal or result.source,
+                publication=result.source,
                 year=int(result.year) if result.year and result.year.isdigit() else None,
             )
             for i, result in enumerate(results, start=1)

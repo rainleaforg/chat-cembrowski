@@ -23,6 +23,9 @@ from xml.etree import ElementTree
 import requests
 from dotenv import load_dotenv
 
+from . import llm as llm_module
+from .prompts import NIH_SEARCH_TERMS_PROMPT
+
 logger = logging.getLogger(__name__)
 load_dotenv()
 
@@ -41,6 +44,60 @@ _TAG_RE = re.compile(r"<[^>]+>")
 # Simple in-process memo so repeated/similar questions in one process don't
 # re-hit the NIH APIs. Keyed on (function, normalized term).
 _CACHE: dict[tuple[str, str], list["NIHResult"]] = {}
+
+# Ceiling, not a reservation -- same thinking-model trap as CLASSIFIER_MAX_TOKENS
+# in query_engine.py: a starved reasoning budget returns empty content with no
+# exception, not an error.
+SEARCH_TERMS_MAX_TOKENS = 512
+
+_SEARCH_TERMS_CACHE: dict[str, str] = {}
+
+
+def extract_search_terms(question: str, llm_client, config: "llm_module.LLMConfig") -> str:
+    """
+    Extract 2-5 keywords from `question` for the MedlinePlus/PubMed keyword
+    search, via the cheap classifier model.
+
+    Sending a whole sentence to a keyword search is why so many questions
+    returned nothing: "Who won the last FIFA World Cup?" sent verbatim
+    matches nothing MedlinePlus indexes, but "FIFA World Cup" as a term at
+    least would. Falls back to the raw question on any API failure or empty
+    completion, matching this module's existing degrade-gracefully pattern.
+    """
+    cache_key = question.strip().lower()
+    if cache_key in _SEARCH_TERMS_CACHE:
+        return _SEARCH_TERMS_CACHE[cache_key]
+
+    try:
+        response = llm_client.chat.completions.create(
+            model=config.classifier_model,
+            temperature=0,
+            max_tokens=SEARCH_TERMS_MAX_TOKENS,
+            messages=[
+                {"role": "system", "content": NIH_SEARCH_TERMS_PROMPT},
+                {"role": "user", "content": question},
+            ],
+            **llm_module.completion_extras(
+                config, effort=llm_module.CLASSIFIER_REASONING_EFFORT
+            ),
+        )
+    except Exception as e:
+        logger.warning(f"Search-term extraction failed ({e}); using the raw question.")
+        return question
+
+    choice = response.choices[0]
+    terms = (choice.message.content or "").strip()
+
+    if not terms:
+        logger.warning(
+            "Search-term extraction returned no content "
+            f"(model={config.classifier_model}, finish_reason={choice.finish_reason!r}); "
+            "using the raw question."
+        )
+        return question
+
+    _SEARCH_TERMS_CACHE[cache_key] = terms
+    return terms
 
 
 @dataclass
@@ -233,8 +290,9 @@ def search_nih(
     Search NIH sources for a general medical question.
 
     MedlinePlus (plain-language, patient-facing) is tried first since it's the
-    better fit for non-technical users. PubMed is used as a supplementary
-    fallback when MedlinePlus has few or no matches.
+    better fit for non-technical users. PubMed is a supplement, not a
+    fallback: it fires whenever MedlinePlus returns fewer than `medlineplus_max`
+    results, not only when MedlinePlus returns none.
     """
     results = search_medlineplus(term, max_results=medlineplus_max)
 

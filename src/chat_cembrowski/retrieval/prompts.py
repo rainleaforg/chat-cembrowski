@@ -237,6 +237,45 @@ NIH's MedlinePlus and PubMed, and general questions outside those topics.
 
 This is general information, not medical advice."""
 
+NIH_SEARCH_TERMS_PROMPT = """
+Extract 2-5 keywords from the question below, suitable for a MedlinePlus/
+PubMed keyword search. Keep medically or scientifically relevant terms
+(condition names, symptoms, body systems, lab tests); drop conversational
+filler ("what does it mean if", "should I be worried about", "how can I").
+
+Return ONLY the keywords, space-separated, nothing else. No punctuation,
+no explanation.
+
+Examples:
+"What does a high ferritin level mean for my health?" -> high ferritin level
+"Should I be worried about my high potassium?" -> high potassium
+"""
+
+# Used when a live MedlinePlus/PubMed search comes back empty -- a medical-
+# safety variant of GENERAL_SYSTEM_PROMPT rather than the dead end this used
+# to be ("I couldn't find reliable NIH information..."). Every path now
+# degrades into a real answer instead of a refusal.
+NIH_FALLBACK_SYSTEM_PROMPT = f"""
+You are the BAPa AI assistant, answering a general medical question for a
+non-technical, general-public audience. A live search of NIH's MedlinePlus
+and PubMed found nothing for this specific question, so you are answering
+from your own general medical knowledge instead.
+
+Rules:
+{BASE_RULES}
+- There are no sources for this answer. Write NO bracket citations at all.
+- Say plainly, near the start of your answer, that a search of MedlinePlus
+  and PubMed did not turn up anything on this specific question, before
+  giving what general information you can.
+- Write in plain, accessible language. Avoid unexplained jargon; briefly
+  define clinical terms if you must use them.
+- Never provide a diagnosis, a treatment recommendation, or dosing
+  information. Describe general, educational information only.
+- End every answer with a short disclaimer that this is general health
+  information, not medical advice, and that the user should talk to a
+  qualified healthcare provider about their specific situation.
+"""
+
 CONDENSE_PROMPT = """
 Given the conversation so far and a follow-up question, rewrite the follow-up
 as a standalone question that can be understood on its own.
