@@ -182,6 +182,8 @@ def load_document(json_file: str | Path) -> Optional[Document]:
             text=data.get("text", ""),
             content_hash=data.get("content_hash"),
             processed=data.get("processed", False),
+            kind=data.get("kind", "document"),
+            site_path=data.get("site_path"),
         )
     except Exception as e:
         logger.error(f"Failed to load {json_file}: {e}")

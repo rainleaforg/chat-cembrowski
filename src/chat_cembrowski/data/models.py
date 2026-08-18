@@ -79,6 +79,8 @@ class Document:
     text: str = ""
     content_hash: Optional[str] = None  # sha256 of text; detects edits
     processed: bool = False
+    kind: str = "document"        # "site" | "document" — see chat-cembrowski's kind tiers
+    site_path: Optional[str] = None  # required when kind == "site"
 
     def to_dict(self) -> dict:
         return {
@@ -89,6 +91,8 @@ class Document:
             "text": self.text,
             "content_hash": self.content_hash,
             "processed": self.processed,
+            "kind": self.kind,
+            "site_path": self.site_path,
         }
 
 
