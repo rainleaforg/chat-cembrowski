@@ -148,6 +148,36 @@ def match_author(question: str, known_authors: list[str]) -> str | None:
     return name
 
 
+def title_names_author(title: str, author_name: str) -> bool:
+    """
+    True if `title` names `author_name` -- used to tell a person's own bio
+    page apart from an unrelated site page.
+
+    A similarity score cannot make this call. Author names are never embedded
+    (see the module docstring), so a name-vs-site-page search scores on prose
+    similarity alone, and a filtered vector search always returns its top
+    hits. Measured against the live BAPa-V2 collection: a real bio scores
+    0.53-0.60 for its own subject, but "Jialin Qiu" -- a co-author with no
+    bio page -- still pulls the Security and Privacy page at 0.386, above
+    every threshold in the system. There is no gap to threshold on.
+
+    So this checks the title instead, mirroring match_author's second check:
+    the name's most distinctive token (its longest, almost always the
+    surname) has to be well represented in the title. Exact, and it does not
+    drift when the embedding model changes.
+    """
+    longest_token = max(_tokens(author_name), key=len, default="")
+    if len(longest_token) < MIN_SIGNIFICANT_TOKEN_LENGTH:
+        return False
+
+    return (
+        fuzz.partial_ratio(
+            utils.default_process(longest_token), utils.default_process(title)
+        )
+        >= MATCH_THRESHOLD
+    )
+
+
 def fetch_chunks_by_author(
     client: QdrantClient, collection_name: str, author_name: str
 ) -> Iterator:

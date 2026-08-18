@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 load_dotenv()
 
 
-COLLECTION_NAME = "BAPa-V1"
+COLLECTION_NAME = "BAPa-V2"
 
 EMBEDDING_MODEL = "voyage-multimodal-3.5"
 VECTOR_DIM = 1024
@@ -123,10 +123,11 @@ def ensure_collection(
     # retrieval.authors filters on this field (Qdrant scroll with a payload
     # filter) to answer "who is X" questions — that filter 400s without an
     # explicit index. paper_id and doc_id back delete_points_for(), which
-    # re-indexing runs on every source before upserting. Called unconditionally
+    # re-indexing runs on every source before upserting. kind/source_type back
+    # the routed filtered searches in query_engine. Called unconditionally
     # (not just on fresh collections) since it's idempotent and existing
     # collections predate these fields.
-    for field in ("authors", "paper_id", "doc_id"):
+    for field in ("authors", "paper_id", "doc_id", "kind", "source_type"):
         client.create_payload_index(
             collection_name=collection_name,
             field_name=field,
@@ -172,9 +173,9 @@ def delete_points_for(
     if not existing:
         return 0
 
-    # link_posters.py writes site_path/poster_id onto poster chunks *after*
-    # ingestion via set_payload. Re-indexing drops them, and the only symptom
-    # is a citation quietly losing its link, so say so loudly.
+    # site_path/poster_id are stamped onto poster chunks by the ingestion-lambda,
+    # separately from this pipeline. Re-indexing here drops them, and the only
+    # symptom is a citation quietly losing its link, so say so loudly.
     linked = 0
     try:
         linked = client.count(
@@ -198,8 +199,8 @@ def delete_points_for(
     if linked:
         logger.warning(
             f"{linked} of those point(s) carried website link metadata "
-            "(site_path/poster_id). Re-run 'uv run scripts/link_posters.py --apply' "
-            "after this ingestion or their citations will render unlinked."
+            "(site_path/poster_id) that this re-index just dropped — their "
+            "citations will render unlinked until it's restamped."
         )
 
     return existing

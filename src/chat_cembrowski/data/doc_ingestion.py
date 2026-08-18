@@ -7,9 +7,12 @@ Run with: uv run -m chat_cembrowski.data.doc_ingestion
 
 import hashlib
 import logging
+import re
 import uuid
 from pathlib import Path
 from typing import Optional
+
+import yaml
 
 from .models import Document
 from .serialization import save_document, load_documents_from_json
@@ -18,6 +21,12 @@ logger = logging.getLogger(__name__)
 
 DOCS_DIR = Path(__file__).resolve().parents[3] / "data" / "docs"
 DOC_JSON_DIR = Path(__file__).resolve().parents[3] / "data" / "doc_json"
+
+# Developer-authored site/internal knowledge markdown (see scripts/ingest_knowledge.py)
+# — a separate source directory from data/docs/, ingested straight to Qdrant
+# rather than through vectordb.py's paper-centric __main__ loop.
+KNOWLEDGE_DIR = Path(__file__).resolve().parents[3] / "data" / "knowledge"
+KNOWLEDGE_JSON_DIR = Path(__file__).resolve().parents[3] / "data" / "knowledge_json"
 
 # Fixed namespace for deriving a stable Document ID from its filename, so an
 # edited file maps back to the same record (and therefore the same chunk IDs)
@@ -117,6 +126,37 @@ def _extract_code(file_path: Path) -> str:
     return file_path.read_text(encoding="utf-8", errors="replace")
 
 
+_FRONT_MATTER_RE = re.compile(r"\A---[ \t]*\n(.*?\n)---[ \t]*\n?", re.DOTALL)
+
+
+def _parse_front_matter(text: str) -> tuple[dict, str]:
+    """
+    Split a leading YAML front-matter block (title/kind/site_path) off a
+    markdown file's text. Returns ({}, text) unchanged when there is none.
+
+    The front-matter is stripped from the returned body so it never reaches
+    the model as prose — kind/site_path are metadata, not content.
+    """
+    match = _FRONT_MATTER_RE.match(text)
+    if not match:
+        return {}, text
+    try:
+        metadata = yaml.safe_load(match.group(1)) or {}
+    except yaml.YAMLError as e:
+        logger.warning(f"Malformed front-matter, ignoring it: {e}")
+        return {}, text
+    # safe_load happily returns a scalar or a list for a well-formed block
+    # that just isn't a mapping ("kind: site" without the key, a bare list).
+    # Callers read metadata with .get(), so anything else is malformed here.
+    if not isinstance(metadata, dict):
+        logger.warning(
+            "Front-matter is %s, not a mapping — ignoring it.",
+            type(metadata).__name__,
+        )
+        return {}, text
+    return metadata, text[match.end():]
+
+
 def ingest_local_docs(
     docs_dir: Path = DOCS_DIR,
     doc_json_dir: Path = DOC_JSON_DIR,
@@ -164,22 +204,51 @@ def ingest_local_docs(
             logger.error(f"Failed to extract text from {file_path.name}: {e}")
             continue
 
+        front_matter: dict = {}
+        if ext == ".md":
+            front_matter, text = _parse_front_matter(text)
+
+        title = front_matter.get("title") or file_path.stem
+        kind = front_matter.get("kind", "document")
+        site_path = front_matter.get("site_path")
+
+        if kind == "site" and not site_path:
+            logger.error(
+                f"'{file_path.name}': kind is 'site' but front-matter has no "
+                "site_path — skipping. A site chunk with no link can't be cited."
+            )
+            continue
+
         digest = content_hash(text)
         prior = existing.get(file_path.name)
 
         if prior is not None:
-            if prior.content_hash == digest:
+            # kind/site_path affect only the chunk payload, not the embedded
+            # text, so they're excluded from content_hash — but a front-matter-
+            # only edit still has to trigger re-ingestion, or the old payload
+            # values would never get refreshed.
+            metadata_changed = (
+                prior.title != title or prior.kind != kind or prior.site_path != site_path
+            )
+            if prior.content_hash == digest and not metadata_changed:
                 logger.info(f"Unchanged, skipping: {file_path.name}")
                 continue
 
             # Edited in place. Keep the ID (so chunk IDs stay stable) and clear
             # processed so vectordb re-indexes: it deletes this doc_id's points
             # before upserting, which also clears chunks an edit removed.
-            reason = "content changed" if prior.content_hash else "no stored hash"
+            if not prior.content_hash:
+                reason = "no stored hash"
+            elif prior.content_hash != digest:
+                reason = "content changed"
+            else:
+                reason = "front-matter changed"
             logger.info(f"Re-ingesting '{file_path.name}' ({reason}).")
             prior.text = text
             prior.file_type = file_type
-            prior.title = file_path.stem
+            prior.title = title
+            prior.kind = kind
+            prior.site_path = site_path
             prior.content_hash = digest
             prior.processed = False
             save_document(prior, doc_json_dir)
@@ -188,16 +257,20 @@ def ingest_local_docs(
 
         doc = Document(
             id=doc_id_for(file_path.name),
-            title=file_path.stem,
+            title=title,
             source_file=file_path.name,
             file_type=file_type,
             text=text,
             content_hash=digest,
             processed=False,
+            kind=kind,
+            site_path=site_path,
         )
         save_document(doc, doc_json_dir)
         new_docs.append(doc)
-        logger.info(f"Created Document: '{doc.title}' ({doc.file_type}, {len(doc.text):,} chars)")
+        logger.info(
+            f"Created Document: '{doc.title}' ({doc.file_type}, kind={doc.kind}, {len(doc.text):,} chars)"
+        )
 
     logger.info(
         f"Document ingestion complete. New: {len(new_docs)}, updated: {len(updated_docs)}."

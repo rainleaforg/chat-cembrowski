@@ -568,7 +568,7 @@ def _build_doc_embed_text(doc: Document, chunk_text: str) -> str:
 
 
 def _build_doc_payload(doc: Document, chunk_index: int, chunk_text: str) -> dict:
-    return {
+    payload = {
         "source_type": "document",
         "chunk_category": "text",
         "doc_id": doc.id,
@@ -576,7 +576,11 @@ def _build_doc_payload(doc: Document, chunk_index: int, chunk_text: str) -> dict
         "file_type": doc.file_type,
         "chunk_index": chunk_index,
         "text": chunk_text,
+        "kind": doc.kind,
     }
+    if doc.site_path:
+        payload["site_path"] = doc.site_path
+    return payload
 
 
 def chunk_document(doc: Document) -> list[Chunk]:

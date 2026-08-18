@@ -36,7 +36,11 @@ from pathlib import Path
 
 QUESTIONS_PATH = Path(__file__).resolve().parent / "eval_questions.json"
 
-ROUTES = ("cembrowski", "nih", "meta", "author")
+ROUTES = ("cembrowski", "site", "nih", "general", "hostile", "author", "identity")
+
+# Routes whose RouteDecision carries a real top-hit Qdrant score (gated by
+# SCORE_THRESHOLD) -- used to group the score report below.
+SCORED_ROUTES = ("cembrowski", "site")
 
 # Emitted by QueryEngine._classify when the model returns a successful response
 # with no content. On a thinking model that means reasoning ate the whole
@@ -211,15 +215,15 @@ def print_report(cases: list[Case], empty_labels: int, full: bool, score_thresho
 
     scored = [c for c in cases if c.top_score is not None]
     if scored:
-        corpus = [c.top_score for c in scored if c.expected == "cembrowski"]
-        other = [c.top_score for c in scored if c.expected != "cembrowski"]
+        corpus = [c.top_score for c in scored if c.expected in SCORED_ROUTES]
+        other = [c.top_score for c in scored if c.expected not in SCORED_ROUTES]
         print("\n" + "-" * 78)
-        print(f"TOP-HIT QDRANT SCORES  (SCORE_THRESHOLD gates cembrowski at {score_threshold:.2f})")
+        print(f"TOP-HIT QDRANT SCORES  (SCORE_THRESHOLD gates cembrowski/site at {score_threshold:.2f})")
         print("-" * 78)
         if corpus:
-            print(f"  corpus questions : min={min(corpus):.3f}  max={max(corpus):.3f}  n={len(corpus)}")
+            print(f"  cembrowski/site questions : min={min(corpus):.3f}  max={max(corpus):.3f}  n={len(corpus)}")
         if other:
-            print(f"  other questions  : min={min(other):.3f}  max={max(other):.3f}  n={len(other)}")
+            print(f"  other questions           : min={min(other):.3f}  max={max(other):.3f}  n={len(other)}")
 
     print("\n" + "-" * 78)
     print(f"  empty classifier completions: {empty_labels}")
@@ -257,7 +261,7 @@ def main() -> None:
     parser.add_argument("--provider", choices=["openrouter", "openai"],
                         help="Override LLM_PROVIDER for this run, to compare providers on the same set.")
     parser.add_argument("--collection", default=None, help="Qdrant collection (default: the configured one).")
-    parser.add_argument("--group", nargs="+", default=None, help="Only run these groups (poster, book, consumer, meta, author).")
+    parser.add_argument("--group", nargs="+", default=None, help="Only run these groups (see scripts/eval_questions.json).")
     parser.add_argument("--full", action="store_true",
                         help="Also generate answers and check citation integrity. Slow, and costs real tokens.")
     parser.add_argument("--save", default=None, help="Write per-question results to this JSON path.")
