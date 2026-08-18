@@ -145,6 +145,15 @@ def _parse_front_matter(text: str) -> tuple[dict, str]:
     except yaml.YAMLError as e:
         logger.warning(f"Malformed front-matter, ignoring it: {e}")
         return {}, text
+    # safe_load happily returns a scalar or a list for a well-formed block
+    # that just isn't a mapping ("kind: site" without the key, a bare list).
+    # Callers read metadata with .get(), so anything else is malformed here.
+    if not isinstance(metadata, dict):
+        logger.warning(
+            "Front-matter is %s, not a mapping — ignoring it.",
+            type(metadata).__name__,
+        )
+        return {}, text
     return metadata, text[match.end():]
 
 

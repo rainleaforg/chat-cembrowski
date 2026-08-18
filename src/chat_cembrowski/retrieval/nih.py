@@ -13,9 +13,11 @@ same way query_engine builds context from Qdrant chunks.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import re
+from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Optional
 from xml.etree import ElementTree
@@ -42,15 +44,49 @@ NCBI_EMAIL = os.getenv("NCBI_EMAIL")
 _TAG_RE = re.compile(r"<[^>]+>")
 
 # Simple in-process memo so repeated/similar questions in one process don't
-# re-hit the NIH APIs. Keyed on (function, normalized term).
-_CACHE: dict[tuple[str, str], list["NIHResult"]] = {}
+# re-hit the NIH APIs.
+#
+# Keys are digests, not the text they memoize, and both caches are bounded.
+# The medical route is defined as "a member of the public asking about their
+# own health" (prompts.py::CLASSIFIER_PROMPT), so the questions reaching this
+# module are the most sensitive input the system takes -- and the module is
+# imported once per process, so an unbounded dict of them would live for the
+# process lifetime and grow with every distinct question. A digest still
+# collapses repeats (the only thing the memo needs) without retaining the
+# question itself. The search *term* is covered too: extract_search_terms
+# falls back to the raw question, so it reaches _CACHE verbatim.
+_CACHE_MAX_ENTRIES = 512
+
+_CACHE: OrderedDict[str, list[NIHResult]] = OrderedDict()
+
+
+def _cache_key(*parts: str) -> str:
+    """Digest of the cache-key parts, so no user text is retained as a key."""
+    return hashlib.sha256("::".join(parts).encode("utf-8")).hexdigest()
+
+
+def _cache_get(cache: OrderedDict, key: str):
+    """Fetch and mark most-recently-used. Returns None on a miss."""
+    if key not in cache:
+        return None
+    cache.move_to_end(key)
+    return cache[key]
+
+
+def _cache_put(cache: OrderedDict, key: str, value) -> None:
+    """Store, evicting least-recently-used entries past _CACHE_MAX_ENTRIES."""
+    cache[key] = value
+    cache.move_to_end(key)
+    while len(cache) > _CACHE_MAX_ENTRIES:
+        cache.popitem(last=False)
+
 
 # Ceiling, not a reservation -- same thinking-model trap as CLASSIFIER_MAX_TOKENS
 # in query_engine.py: a starved reasoning budget returns empty content with no
 # exception, not an error.
 SEARCH_TERMS_MAX_TOKENS = 512
 
-_SEARCH_TERMS_CACHE: dict[str, str] = {}
+_SEARCH_TERMS_CACHE: OrderedDict[str, str] = OrderedDict()
 
 
 def extract_search_terms(question: str, llm_client, config: "llm_module.LLMConfig") -> str:
@@ -64,9 +100,10 @@ def extract_search_terms(question: str, llm_client, config: "llm_module.LLMConfi
     least would. Falls back to the raw question on any API failure or empty
     completion, matching this module's existing degrade-gracefully pattern.
     """
-    cache_key = question.strip().lower()
-    if cache_key in _SEARCH_TERMS_CACHE:
-        return _SEARCH_TERMS_CACHE[cache_key]
+    cache_key = _cache_key("search_terms", question.strip().lower())
+    cached = _cache_get(_SEARCH_TERMS_CACHE, cache_key)
+    if cached is not None:
+        return cached
 
     try:
         response = llm_client.chat.completions.create(
@@ -96,7 +133,7 @@ def extract_search_terms(question: str, llm_client, config: "llm_module.LLMConfi
         )
         return question
 
-    _SEARCH_TERMS_CACHE[cache_key] = terms
+    _cache_put(_SEARCH_TERMS_CACHE, cache_key, terms)
     return terms
 
 
@@ -146,9 +183,10 @@ def search_medlineplus(term: str, max_results: int = 4) -> list[NIHResult]:
     Returns an empty list (rather than raising) on any network/parse failure,
     so a single flaky request degrades the answer instead of crashing it.
     """
-    cache_key = ("medlineplus", term.strip().lower())
-    if cache_key in _CACHE:
-        return _CACHE[cache_key]
+    cache_key = _cache_key("medlineplus", term.strip().lower())
+    cached = _cache_get(_CACHE, cache_key)
+    if cached is not None:
+        return cached
 
     try:
         response = requests.get(
@@ -184,7 +222,7 @@ def search_medlineplus(term: str, max_results: int = 4) -> list[NIHResult]:
             NIHResult(source="MedlinePlus", title=title, summary=summary, url=url)
         )
 
-    _CACHE[cache_key] = results
+    _cache_put(_CACHE, cache_key, results)
     return results
 
 
@@ -195,9 +233,10 @@ def search_pubmed(term: str, max_results: int = 3) -> list[NIHResult]:
     Two-step E-utilities flow: esearch for PMIDs, then efetch for abstract XML.
     Returns an empty list on any failure rather than raising.
     """
-    cache_key = ("pubmed", term.strip().lower())
-    if cache_key in _CACHE:
-        return _CACHE[cache_key]
+    cache_key = _cache_key("pubmed", term.strip().lower())
+    cached = _cache_get(_CACHE, cache_key)
+    if cached is not None:
+        return cached
 
     try:
         esearch_resp = requests.get(
@@ -221,7 +260,7 @@ def search_pubmed(term: str, max_results: int = 3) -> list[NIHResult]:
         return []
 
     if not id_list:
-        _CACHE[cache_key] = []
+        _cache_put(_CACHE, cache_key, [])
         return []
 
     try:
@@ -277,7 +316,7 @@ def search_pubmed(term: str, max_results: int = 3) -> list[NIHResult]:
             )
         )
 
-    _CACHE[cache_key] = results
+    _cache_put(_CACHE, cache_key, results)
     return results
 
 

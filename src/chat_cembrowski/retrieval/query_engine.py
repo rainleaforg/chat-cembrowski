@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
 
 import voyageai
@@ -78,6 +79,49 @@ EMPTY_ANSWER_FALLBACK = (
 # the two populations. Re-measure before changing the embedding model or the
 # chunking strategy, since both shift the score distribution.
 SCORE_THRESHOLD = 0.30
+
+# The labels CLASSIFIER_PROMPT is allowed to emit. "cembrowski" is the default
+# and so is never matched for explicitly -- see `_resolve_label`.
+KNOWN_LABELS = ("hostile", "site", "medical", "general")
+
+_LABEL_WORD_RE = re.compile(r"[a-z]+")
+
+
+def _resolve_label(label: str) -> str:
+    """
+    Map a raw classifier completion onto one of KNOWN_LABELS, or "cembrowski".
+
+    CLASSIFIER_PROMPT asks for exactly one word, but models wrap it in prose,
+    so this cannot just compare strings -- nor can it scan for a substring,
+    which is what it used to do. "This is not hostile, it is a general
+    question." contains "hostile", and hostile was checked first, so a benign
+    question got the refusal reply. That is the worst misroute the system can
+    produce, and prose that names a label while rejecting it is exactly the
+    shape a chatty model emits.
+
+    So: an exact label wins outright; otherwise the completion is tokenised
+    and a label is only honoured when it is the *only* one named. Anything
+    ambiguous falls back to "cembrowski", the same safe default used for an
+    API failure -- the score check in `_route` still catches an off-topic
+    question from there.
+    """
+    exact = label.strip().strip(".!?,:;'\"")
+    if exact in KNOWN_LABELS:
+        return exact
+
+    named = {w for w in _LABEL_WORD_RE.findall(label) if w in KNOWN_LABELS}
+    if len(named) == 1:
+        return named.pop()
+
+    if named:
+        logger.warning(
+            "Classifier completion names %d labels (%s); defaulting to "
+            "'cembrowski'. Completion: %r",
+            len(named),
+            sorted(named),
+            label[:200],
+        )
+    return "cembrowski"
 
 
 @dataclass
@@ -506,10 +550,7 @@ class QueryEngine:
             )
             return "cembrowski"
 
-        for known in ("hostile", "site", "medical", "general"):
-            if known in label:
-                return known
-        return "cembrowski"
+        return _resolve_label(label)
 
     def _answer_cembrowski(
         self,
@@ -705,11 +746,25 @@ Additional background (not citable — do not cite these with a bracket number, 
         recent representative work, not a full citation dump. Bio chunks are
         prepended so they win ties for citation order.
         """
-        bio_chunks = self._search(
-            self._embed_query(author_name),
-            kind_filter=("site",),
-            limit=AUTHOR_BIO_CHUNKS,
-        )
+        # Title-gated, because a filtered vector search always returns its top
+        # hits: `_match_author` matches every author in the corpus, but only
+        # George and Jenna have bio pages, so for anyone else this search
+        # returns three unrelated site chunks -- and those carry a site_path,
+        # so `_answer_cembrowski` promotes them to numbered SOURCE blocks and
+        # cites e.g. the privacy page under "who is Jialin Qiu".
+        #
+        # SCORE_THRESHOLD does not separate these; measured against the live
+        # collection, the unrelated hits score 0.31-0.39, above it. See
+        # authors.title_names_author for the numbers and the reasoning.
+        bio_chunks = [
+            c
+            for c in self._search(
+                self._embed_query(author_name),
+                kind_filter=("site",),
+                limit=AUTHOR_BIO_CHUNKS,
+            )
+            if authors.title_names_author(c.title, author_name)
+        ]
 
         points = authors.fetch_chunks_by_author(
             self.qdrant, self.collection_name, author_name

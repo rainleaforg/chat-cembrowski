@@ -51,11 +51,28 @@ def main() -> None:
     client = get_qdrant_client()
     vo = get_voyage_client()
 
+    # doc.processed lives in data/knowledge_json/ and records nothing about
+    # *which* collection received the points, so it can only be trusted for
+    # the default one. Honouring it for a scratch collection breaks both ways:
+    # a scratch run would mark documents processed and the next production run
+    # would skip all of them (silently — and ensure_collection creates a
+    # missing collection, so a typo'd --collection reads the same), while a
+    # scratch run after a production run would ingest nothing at all.
+    # So: for any non-default collection, ingest everything and persist nothing.
+    is_default_collection = args.collection == COLLECTION_NAME
+    if not is_default_collection:
+        logger.info(
+            "Target collection is '%s', not the default '%s' — re-ingesting "
+            "every document and leaving the local processed flags untouched.",
+            args.collection,
+            COLLECTION_NAME,
+        )
+
     try:
         ensure_collection(client, collection_name=args.collection)
 
         for doc in load_documents_from_json(KNOWLEDGE_JSON_DIR):
-            if doc.processed:
+            if doc.processed and is_default_collection:
                 logger.info(f"'{doc.title}' unchanged — skipping.")
                 continue
 
@@ -66,10 +83,22 @@ def main() -> None:
             # redoes the whole record instead of leaving it half-indexed.
             delete_points_for(client, "doc_id", doc.id, collection_name=args.collection)
 
-            if embed_and_upsert(client, vo, chunks, collection_name=args.collection) > 0:
+            upserted = embed_and_upsert(
+                client, vo, chunks, collection_name=args.collection
+            )
+            if upserted == 0:
+                logger.warning(
+                    "'%s' produced no points (%d chunk(s)) — nothing upserted, "
+                    "leaving it unprocessed so the next run retries it.",
+                    doc.title,
+                    len(chunks),
+                )
+                continue
+
+            if is_default_collection:
                 doc.processed = True
                 save_document(doc, KNOWLEDGE_JSON_DIR)
-                logger.info(f"Ingested '{doc.title}' (kind={doc.kind}).")
+            logger.info(f"Ingested '{doc.title}' (kind={doc.kind}).")
     finally:
         client.close()
 
